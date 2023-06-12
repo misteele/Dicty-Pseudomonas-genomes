@@ -1,0 +1,69 @@
+# Command line and R code for Steele et al., 2023
+
+# Genome assembly
+unicycler -1 13B_3_2_Bac1_S14_R1_001.fastq.gz -2 13B_3_2_Bac1_S14_R2_001.fastq.gz -o 13B_3_2_Bac1_Unicycler_Assembly_20210903
+
+quast.py 13B_3_2_Bac1_Unicycler_Assembly_20210903/assembly.fasta -o 13B_3_2_Bac1_Quast_Output_20210903
+
+fastANI --ql Pseudomonas_genome_query_list.txt --rl Pseudomonas_genome_reference_list.txt -o Pseudomonas_genome_fastANI_output.txt
+more Pseudomonas_genome_fastANI_output.txt | sed 's/\t/,/g' | sed 's/_GCF/,GCF/g' | sed 's/\.fna//g' > Pseudomonas_genome_fastANI_output.csv
+
+# AntiSMASH
+antismash --genefinding-tool prodigal --cb-general --cb-knownclusters --cb-subclusters --asf --pfam2go --smcog-trees --output-dir 13B_2_1_Bac1_antiSMASH 13B_2_1_Bac1.gbk 
+
+
+# BLAST searches for homologs to known predation resistance factors
+# Command line:
+# Make a local BLAST database containing all of the proteins encoded by a single Pseudomonas genome
+makeblastdb -in Pseudomonas_6D.7.1.Bac1.faa -out Pseudomonas_6D.7.1.1_db -dbtype prot -parse_seqids
+
+#Loop through files in a directory containing nucleotide sequences of T6SS, T3SS, or secondary metabolite biosynthetic gene cluster loci and use blastx and blastdbcmd to obtain protein sequences for genes in the locus.
+#BLAST protein sequences against all protein sequences from all genomes of interest to identify homologs
+for i in ./Reference_loci/Pseudomonas_6D.7.1.1/*.fasta; do 
+	id=$(echo $i | sed 's/.fasta//g');
+	blastx -db Pseudomonas_6D.7.1.1_db -query $i -outfmt "6 sseqid pident" -out ${id}_blastx.txt -num_threads 4 -max_target_seqs 500; 
+	more ${id}_blastx.txt | awk '$2>=100{print $1}' | sort -u > ${id}_blastx.filtered.txt;
+	blastdbcmd -db Pseudomonas_6D.7.1.1_db -entry_batch ${id}_blastx.filtered.txt -out ${id}_blastx.seqs.fa; 
+	blastp -db all_genomes_prot_db -query ${id}_blastx.seqs.fa -outfmt "6 qseqid sseqid qcovs pident" -out ${id}_all_blastp.txt;
+	more ${id}_all_blastp.txt | awk '$3>=50{print $1","$2","$4","$3}' > ${id}_all_blastp.filtered.csv; 
+	more ${id}_all_blastp.filtered.csv | sed 's/.peg./,peg./g' | sed 's/_WP/,WP/g' | sed 's/_NP/,NP/g' | sort -t, -k3,3 -k2,2 -k5,5nr | sort -t, -k1,3 -u | sort -t, -k3,3 -k2,2 -k5,5nr | awk -F, '{print $1,$2,$3,$3,$4,$5,$6}' | tr ' ' ','| sed 's/,peg./.peg./g' | sed 's/,WP/_WP/g' | sed 's/,NP/_NP/g' > ${id}_all_blastp.filtered.2.csv;
+	more ${id}_all_blastp.filtered.2.csv | awk -F, '{print $1","$2","$4}' > ${id}_all_blastp.filtered.3.csv;
+done
+
+
+
+# In R, make heatmaps showing highest percent identity blast hits for each genome to each gene in the cluster
+
+library(reshape2)
+library(ggplot2)
+
+colnames(data) = c("Ref","Hit","Pident")
+data.melt <- melt(data, na.rm = FALSE)
+data.cast <- acast(data.melt, Ref ~ Hit)
+
+hm <- ggplot(data.melt, aes(Hit, Ref, fill = value)) +                         
+  geom_tile(color="black") + coord_fixed() + 
+  theme(axis.text.x = element_text(angle = 90, hjust=1, vjust=0), panel.background = element_blank()) +
+  scale_fill_gradient(low = "white", high = "#330066", na.value = "white") +
+  xlab("Pseudomonas genomes") + ylab("Reference genes") + labs(fill = "% identity")
+hm
+
+
+
+# Fishers exact test in R
+
+spottest.data <- read.csv("~/Pseudomonas_spot_test_data_for_Fishers_test.csv", row.names = 1, header= TRUE)
+fisher.pval <- apply(spottest.data, 1, function(x) fisher.test(matrix(x,nr=2))$p.value)
+fisher.pval.adj <- p.adjust(fisher.pval, method = "fdr")
+
+spottest.pvals <- as.data.frame(fisher.pval.adj)
+spottest.data$pval <- as.data.frame(fisher.pval)
+spottest.data$pval.adj <- as.data.frame(fisher.pval.adj)
+write.csv(spottest.data, "~/Pseudomonas_spot_test_data_with_Fisher_pvals_FDR_adj.csv")
+
+
+PRgene.data <- read.csv("~/Pseudomonas_edibility_gene_presence_absence_for_fisher_test.csv", row.names = 1, header= TRUE)
+fisher.pval <- apply(PRgene.data, 1, function(x) fisher.test(matrix(x,nr=2))$p.value)
+
+
+
